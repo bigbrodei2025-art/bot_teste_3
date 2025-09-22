@@ -18,14 +18,15 @@ require("dotenv").config();
 
 const MONGO_URL = process.env.MONGO_URL;
 const PORT = process.env.PORT || 3000;
-const MONITORED_GROUP_JID = process.env.MONITORED_GROUP_JID; // grupo monitorado
-const TARGET_GROUP_JID = process.env.TARGET_GROUP_JID;       // grupo destino
+const MONITORED_GROUP_JID = process.env.MONITORED_GROUP_JID; // Grupo monitorado
+const TARGET_GROUP_JID = process.env.TARGET_GROUP_JID;       // Grupo destino
 const client = new MongoClient(MONGO_URL);
 
 let sock, socketCliente, qrState = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 let isClearingSession = false;
+let connectedOnce = false; // Evitar log duplicado
 
 // --- Express / Socket.IO ---
 const app = express();
@@ -35,14 +36,21 @@ app.use(compression());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// --- Salvar e Restaurar Sessão ---
+// --- Salvar Sessão no Mongo ---
 async function saveSessionToMongo(sessionPath) {
   if (isClearingSession) return;
   try {
+    if (!fs.existsSync(sessionPath)) {
+      console.warn("📂 Diretório de sessão ausente, criando...");
+      fs.mkdirSync(sessionPath, { recursive: true });
+      return; // Sai pois não há arquivos ainda
+    }
     await client.connect();
     const col = client.db("baileys").collection("sessions");
     for (const f of fs.readdirSync(sessionPath)) {
-      const content = fs.readFileSync(path.join(sessionPath, f), "utf8");
+      const filePath = path.join(sessionPath, f);
+      if (!fs.existsSync(filePath)) continue;
+      const content = fs.readFileSync(filePath, "utf8");
       await col.updateOne({ fileName: f }, { $set: { content } }, { upsert: true });
     }
   } catch (e) {
@@ -50,13 +58,16 @@ async function saveSessionToMongo(sessionPath) {
   }
 }
 
+// --- Restaurar Sessão do Mongo ---
 async function restoreSessionFromMongo(sessionPath) {
   try {
     await client.connect();
     const docs = await client.db("baileys").collection("sessions").find({}).toArray();
     if (!docs.length) return false;
     if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-    for (const d of docs) fs.writeFileSync(path.join(sessionPath, d.fileName), d.content);
+    for (const d of docs) {
+      fs.writeFileSync(path.join(sessionPath, d.fileName), d.content);
+    }
     return true;
   } catch (e) {
     console.error("Erro ao restaurar sessão:", e);
@@ -64,7 +75,7 @@ async function restoreSessionFromMongo(sessionPath) {
   }
 }
 
-// --- Atualizar QR para front ---
+// --- Atualizar QR no front ---
 function updateQR(status) {
   if (!socketCliente) return;
   if (status === "qr" && qrState) {
@@ -78,7 +89,7 @@ function updateQR(status) {
   }
 }
 
-// --- Conexão ao WhatsApp ---
+// --- Conexão WhatsApp ---
 async function connectToWhatsApp() {
   const sessionPath = path.join(__dirname, "auth_info_baileys");
   await restoreSessionFromMongo(sessionPath);
@@ -121,11 +132,14 @@ async function connectToWhatsApp() {
       reconnectAttempts = 0;
       qrState = null;
       updateQR("connected");
-      console.log("Bot conectado ao WhatsApp");
+      if (!connectedOnce) {
+        console.log("✅ Bot conectado ao WhatsApp");
+        connectedOnce = true;
+      }
     }
   });
 
-  // --- Função de replicar mensagens com filtro Shopee ---
+  // --- Replicar mensagens com filtro Shopee ---
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const m = messages[0];
     if (!m.message || m.key.fromMe) return;
@@ -140,7 +154,7 @@ async function connectToWhatsApp() {
 
       try {
         await sock.sendMessage(TARGET_GROUP_JID, { text: `🛒 Oferta Shopee: ${shopeeUrl}` });
-        console.log(`✅ Link replicado para ${TARGET_GROUP_JID}`);
+        console.log(`✅ Link Shopee replicado para ${TARGET_GROUP_JID}`);
       } catch (err) {
         console.error("Erro ao replicar mensagem:", err);
       }
@@ -180,6 +194,7 @@ app.post("/clear-session", async (req, res) => {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
     qrState = null;
+    connectedOnce = false;
     res.json({ success: true, message: "Sessão limpa." });
   } catch (err) {
     console.error("Erro ao limpar sessão:", err);
