@@ -1,125 +1,151 @@
-// server.js
-const express = require("express");
-const { MongoClient } = require("mongodb");
-const { Boom } = require("@hapi/boom");
+// --- Imports e Configurações ---
 const {
   default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  useMultiFileAuthState
 } = require("@whiskeysockets/baileys");
-const fs = require("fs");
-const path = require("path");
-const http = require("http");
+const express = require("express");
 const { Server } = require("socket.io");
+const http = require("http");
+const compression = require("compression");
+const path = require("path");
+const fs = require("fs");
+const { MongoClient } = require("mongodb");
+const qrcode = require("qrcode");
+const P = require("pino");
+require("dotenv").config();
 
+const MONGO_URL = process.env.MONGO_URL;
+const PORT = process.env.PORT || 3000;
+const client = new MongoClient(MONGO_URL);
+
+let sock, socketCliente, qrState = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+let isClearingSession = false; // FLAG para evitar conflitos
+
+// --- Express / Socket.IO ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-
-const PORT = process.env.PORT || 3000;
-const MONGO_URI = "mongodb://localhost:27017";
-const client = new MongoClient(MONGO_URI);
-
-let sock = null;
-let qrState = null;
-let isClearingSession = false;
-
-// Pasta onde o Baileys salva arquivos locais
-const SESSION_FOLDER = path.join(__dirname, "auth_info_baileys");
-
-// Servir arquivos estáticos
-app.use(express.static(path.join(__dirname, "public")));
+app.use(compression());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-/**
- * Função principal de conexão com o WhatsApp
- */
+// --- Salvar e Restaurar Sessão ---
+async function saveSessionToMongo(sessionPath) {
+  if (isClearingSession) return; // Não salvar enquanto limpa
+  try {
+    await client.connect();
+    const col = client.db("baileys").collection("sessions");
+    for (const f of fs.readdirSync(sessionPath)) {
+      const content = fs.readFileSync(path.join(sessionPath, f), "utf8");
+      await col.updateOne({ fileName: f }, { $set: { content } }, { upsert: true });
+    }
+  } catch (e) {
+    console.error("Erro ao salvar sessão:", e);
+  }
+}
+
+async function restoreSessionFromMongo(sessionPath) {
+  try {
+    await client.connect();
+    const docs = await client.db("baileys").collection("sessions").find({}).toArray();
+    if (!docs.length) return false;
+    if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+    for (const d of docs) {
+      fs.writeFileSync(path.join(sessionPath, d.fileName), d.content);
+    }
+    return true;
+  } catch (e) {
+    console.error("Erro ao restaurar sessão:", e);
+    return false;
+  }
+}
+
+// --- Atualizar QR para front ---
+function updateQR(status) {
+  if (!socketCliente) return;
+  if (status === "qr" && qrState) {
+    qrcode.toDataURL(qrState, (err, url) => {
+      if (!err) socketCliente.emit("qr", url);
+    });
+  } else if (status === "connected") {
+    socketCliente.emit("qrstatus", "./assets/check.svg");
+  } else if (status === "loading") {
+    socketCliente.emit("qrstatus", "./assets/loader.gif");
+  }
+}
+
+// --- Conexão ao WhatsApp ---
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_FOLDER);
+  const sessionPath = path.join(__dirname, "auth_info_baileys");
+  await restoreSessionFromMongo(sessionPath);
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
+    version,
+    logger: P({ level: "silent" }),
+    auth: state
   });
 
-  // Atualiza QR para interface
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    await saveSessionToMongo(sessionPath);
+  });
 
+  sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      reconnectAttempts = 0;
       qrState = qr;
-      io.emit("qr", `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}&size=250x250`);
+      updateQR("qr");
     }
-
     if (connection === "close") {
+      const reason = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      io.emit("log", "Conexão fechada");
-      if (shouldReconnect) connectToWhatsApp();
-    } else if (connection === "open") {
-      io.emit("user", "Conectado");
-      io.emit("log", "Bot conectado ao WhatsApp");
-    }
-  });
+        ![DisconnectReason.loggedOut, DisconnectReason.badSession].includes(reason) &&
+        reconnectAttempts < MAX_RECONNECT_ATTEMPTS;
 
-  sock.ev.on("creds.update", async (creds) => {
-    if (!isClearingSession) {
-      await saveCreds();
+      if (shouldReconnect) {
+        reconnectAttempts++;
+        setTimeout(connectToWhatsApp, Math.min(10000, reconnectAttempts * 2000));
+      } else {
+        reconnectAttempts = 0;
+        qrState = null;
+        console.log("Sessão encerrada. Aguarde nova conexão.");
+      }
+    } else if (connection === "open") {
+      reconnectAttempts = 0;
+      qrState = null;
+      updateQR("connected");
+      console.log("Bot conectado ao WhatsApp");
     }
   });
 }
 
-/**
- * Socket.IO - envia estado inicial ao novo cliente
- */
-io.on("connection", (socket) => {
-  socket.emit("init", {
-    isConnected: !!sock,
-    userName: sock?.user?.name || null,
-  });
-  if (qrState) {
-    socket.emit(
-      "qr",
-      `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qrState)}&size=250x250`
-    );
-  }
-});
-
-/**
- * Rota: Conectar bot
- */
+// --- Rotas ---
 app.post("/connect-bot", async (req, res) => {
-  try {
-    if (!sock) {
-      await connectToWhatsApp();
-    }
-    res.json({ message: "Reconexão solicitada" });
-  } catch (err) {
-    console.error("Erro ao conectar bot:", err);
-    res.status(500).json({ message: "Erro ao conectar bot" });
+  if (sock?.user) {
+    return res.json({ message: "Bot já conectado" });
   }
+  connectToWhatsApp();
+  res.json({ message: "Iniciando conexão..." });
 });
 
-/**
- * Rota: Desconectar bot
- */
 app.post("/disconnect-bot", async (req, res) => {
+  if (!sock) return res.json({ message: "Bot não está conectado" });
   try {
-    if (sock) {
-      await sock.logout();
-      sock = null;
-    }
-    qrState = null;
-    res.json({ message: "Bot desconectado" });
+    await sock.logout(); // Desloga explicitamente
+    res.json({ message: "Desconectado com sucesso" });
   } catch (err) {
-    console.error("Erro ao desconectar:", err);
-    res.status(500).json({ message: "Erro ao desconectar bot" });
+    console.error(err);
+    res.status(500).json({ message: "Erro ao desconectar" });
   }
 });
 
-/**
- * Rota: Limpar sessão (sem deslogar o bot ativo)
- */
 app.post("/clear-session", async (req, res) => {
   if (isClearingSession) {
     return res.status(409).json({ success: false, message: "Limpeza já em andamento" });
@@ -127,17 +153,15 @@ app.post("/clear-session", async (req, res) => {
   isClearingSession = true;
 
   try {
-    // Apaga sessão do MongoDB
     await client.connect();
     await client.db("baileys").collection("sessions").deleteMany({});
 
-    // Apaga arquivos locais
-    if (fs.existsSync(SESSION_FOLDER)) {
-      fs.rmSync(SESSION_FOLDER, { recursive: true, force: true });
+    const sessionPath = path.join(__dirname, "auth_info_baileys");
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
     }
-
     qrState = null;
-    res.json({ success: true, message: "Sessão apagada. Bot continua conectado." });
+    res.json({ success: true, message: "Sessão limpa. Bot permanece conectado." });
   } catch (err) {
     console.error("Erro ao limpar sessão:", err);
     res.status(500).json({ success: false, message: "Erro ao limpar sessão" });
@@ -146,7 +170,18 @@ app.post("/clear-session", async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-  connectToWhatsApp(); // inicia o bot automaticamente
+// --- Socket.IO ---
+io.on("connection", socket => {
+  socketCliente = socket;
+  if (sock?.user) updateQR("connected");
+  else if (qrState) updateQR("qr");
+  else updateQR("loading");
 });
+
+process.on("SIGINT", async () => {
+  await client.close();
+  process.exit(0);
+});
+
+connectToWhatsApp().catch(console.error);
+server.listen(PORT, () => console.log(`Server rodando na porta ${PORT}`));
