@@ -18,12 +18,14 @@ require("dotenv").config();
 
 const MONGO_URL = process.env.MONGO_URL;
 const PORT = process.env.PORT || 3000;
+const MONITORED_GROUP_JID = process.env.MONITORED_GROUP_JID; // grupo monitorado
+const TARGET_GROUP_JID = process.env.TARGET_GROUP_JID;       // grupo destino
 const client = new MongoClient(MONGO_URL);
 
 let sock, socketCliente, qrState = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
-let isClearingSession = false; // FLAG para evitar conflitos
+let isClearingSession = false;
 
 // --- Express / Socket.IO ---
 const app = express();
@@ -35,7 +37,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // --- Salvar e Restaurar Sessão ---
 async function saveSessionToMongo(sessionPath) {
-  if (isClearingSession) return; // Não salvar enquanto limpa
+  if (isClearingSession) return;
   try {
     await client.connect();
     const col = client.db("baileys").collection("sessions");
@@ -54,9 +56,7 @@ async function restoreSessionFromMongo(sessionPath) {
     const docs = await client.db("baileys").collection("sessions").find({}).toArray();
     if (!docs.length) return false;
     if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-    for (const d of docs) {
-      fs.writeFileSync(path.join(sessionPath, d.fileName), d.content);
-    }
+    for (const d of docs) fs.writeFileSync(path.join(sessionPath, d.fileName), d.content);
     return true;
   } catch (e) {
     console.error("Erro ao restaurar sessão:", e);
@@ -124,13 +124,33 @@ async function connectToWhatsApp() {
       console.log("Bot conectado ao WhatsApp");
     }
   });
+
+  // --- Função de replicar mensagens com filtro Shopee ---
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message || m.key.fromMe) return;
+    const sender = m.key.remoteJid;
+    const msg = m.message.conversation || m.message.extendedTextMessage?.text || "";
+    console.log(`📩 Mensagem recebida de: ${sender}`);
+
+    if (sender === MONITORED_GROUP_JID) {
+      const urls = (msg.match(/\bhttps?:\/\/\S+/gi) || []);
+      const shopeeUrl = urls.find(u => u.includes("shopee") || u.includes("shope.ee") || u.includes("s.shopee.com.br"));
+      if (!shopeeUrl) return; // ignora se não for link Shopee
+
+      try {
+        await sock.sendMessage(TARGET_GROUP_JID, { text: `🛒 Oferta Shopee: ${shopeeUrl}` });
+        console.log(`✅ Link replicado para ${TARGET_GROUP_JID}`);
+      } catch (err) {
+        console.error("Erro ao replicar mensagem:", err);
+      }
+    }
+  });
 }
 
 // --- Rotas ---
 app.post("/connect-bot", async (req, res) => {
-  if (sock?.user) {
-    return res.json({ message: "Bot já conectado" });
-  }
+  if (sock?.user) return res.json({ message: "Bot já conectado" });
   connectToWhatsApp();
   res.json({ message: "Iniciando conexão..." });
 });
@@ -138,7 +158,7 @@ app.post("/connect-bot", async (req, res) => {
 app.post("/disconnect-bot", async (req, res) => {
   if (!sock) return res.json({ message: "Bot não está conectado" });
   try {
-    await sock.logout(); // Desloga explicitamente
+    await sock.logout();
     res.json({ message: "Desconectado com sucesso" });
   } catch (err) {
     console.error(err);
@@ -155,13 +175,12 @@ app.post("/clear-session", async (req, res) => {
   try {
     await client.connect();
     await client.db("baileys").collection("sessions").deleteMany({});
-
     const sessionPath = path.join(__dirname, "auth_info_baileys");
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
     qrState = null;
-    res.json({ success: true, message: "Sessão limpa. Bot permanece conectado." });
+    res.json({ success: true, message: "Sessão limpa." });
   } catch (err) {
     console.error("Erro ao limpar sessão:", err);
     res.status(500).json({ success: false, message: "Erro ao limpar sessão" });
