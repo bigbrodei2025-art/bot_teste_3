@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Conectar Vovozinha Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary-color: #5d3fd3;
+      --secondary-color: #8a6ff3;
+      --background-color: #f0f2f5;
+      --text-color: #333;
+      --subtle-text-color: #666;
+      --card-background: #fff;
+      --border-radius: 12px;
+      --box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+      --button-hover: #4e32b4;
+      --danger-color: #e74c3c;
+      --danger-hover: #c0392b;
+      --warning-color: #f39c12;
+      --warning-hover: #e67e22;
+    }
+
+    body {
+      font-family: 'Poppins', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      background-color: var(--background-color);
+      color: var(--text-color);
+    }
+
+    .card {
+      background: var(--card-background);
+      padding: 2.5rem;
+      border-radius: var(--border-radius);
+      box-shadow: var(--box-shadow);
+      text-align: center;
+      width: 100%;
+      max-width: 450px;
+    }
+
+    .header {
+      margin-bottom: 2rem;
+    }
+
+    .header h1 {
+      color: var(--primary-color);
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .header p {
+      color: var(--subtle-text-color);
+      font-size: 1rem;
+    }
+
+    .status-area {
+      margin-bottom: 2rem;
+    }
+
+    #qr-image {
+      width: 250px;
+      height: 250px;
+      border-radius: var(--border-radius);
+      object-fit: contain;
+      border: 2px solid #e0e0e0;
+      padding: 10px;
+    }
+
+    #status-log {
+      font-weight: 600;
+      color: var(--subtle-text-color);
+      margin-top: 1rem;
+      min-height: 24px;
+    }
+
+    .button-area {
+      margin-top: 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .button-area button {
+      background-color: var(--primary-color);
+      color: white;
+      border: none;
+      padding: 12px 25px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-size: 1rem;
+      font-weight: 600;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 15px rgba(93, 63, 211, 0.4);
+    }
+
+    .button-area button:hover {
+      background-color: var(--button-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(93, 63, 211, 0.5);
+    }
+
+    .button-area button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    #disconnect-button {
+      background-color: var(--danger-color);
+      box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4);
+    }
+
+    #disconnect-button:hover {
+      background-color: var(--danger-hover);
+      box-shadow: 0 6px 20px rgba(231, 76, 60, 0.5);
+    }
+
+    #clear-session-button {
+      background-color: var(--warning-color);
+      box-shadow: 0 4px 15px rgba(243, 156, 18, 0.4);
+    }
+
+    #clear-session-button:hover {
+      background-color: var(--warning-hover);
+      box-shadow: 0 6px 20px rgba(243, 156, 18, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <div class="header">
+    <h1>Vovozinha Bot - WhatsApp</h1>
+    <p>A magia do Tarô na palma da sua mão!</p>
+  </div>
+
+  <div class="status-area">
+    <img id="qr-image" src="./assets/loader.gif" alt="QR Code de Conexão">
+    <p id="status-log">Carregando...</p>
+  </div>
+
+  <div class="button-area">
+    <button id="connect-button">Conectar</button>
+    <button id="disconnect-button" style="display: none;">Desconectar</button>
+    <button id="clear-session-button">Limpar Sessão</button>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  const qrImage = document.getElementById('qr-image');
+  const statusLog = document.getElementById('status-log');
+  const connectButton = document.getElementById('connect-button');
+  const disconnectButton = document.getElementById('disconnect-button');
+  const clearSessionButton = document.getElementById('clear-session-button');
+
+  function showDisconnectButton() {
+    disconnectButton.style.display = 'block';
+    connectButton.style.display = 'none';
+    disconnectButton.disabled = false;
+    clearSessionButton.disabled = false;
+  }
+
+  function showConnectButton() {
+    disconnectButton.style.display = 'none';
+    connectButton.style.display = 'block';
+    connectButton.disabled = false;
+    clearSessionButton.disabled = false;
+  }
+
+  function setDisconnectedState() {
+    showConnectButton();
+    statusLog.innerText = 'Bot desconectado. Clique em Conectar para iniciar.';
+    qrImage.src = './assets/disconnected.svg';
+  }
+
+  socket.on('init', (data) => {
+    if (data.isConnected) {
+      showDisconnectButton();
+      statusLog.innerText = `Conectado como: ${data.userName || 'Desconhecido'}`;
+      qrImage.src = './assets/check.svg';
+    } else {
+      setDisconnectedState();
+    }
+  });
+
+  socket.on('qr', (url) => {
+    qrImage.src = url;
+    statusLog.innerText = 'Por favor, escaneie o QR code com seu celular.';
+    disconnectButton.style.display = 'none';
+    connectButton.style.display = 'block';
+    connectButton.disabled = true;
+  });
+
+  socket.on('qrstatus', (statusUrl) => {
+    qrImage.src = statusUrl;
+  });
+
+  socket.on('log', (message) => {
+    statusLog.innerText = message;
+  });
+
+  socket.on('user', (userInfo) => {
+    statusLog.innerText = `Conectado como: ${userInfo.split(' ')[1]}`;
+    showDisconnectButton();
+  });
+
+  connectButton.addEventListener('click', () => {
+    connectButton.disabled = true;
+    statusLog.innerText = 'Conectando... Aguarde o QR code.';
+    qrImage.src = './assets/loader.gif';
+
+    fetch('/connect-bot', { method: 'POST' })
+      .then(response => response.json())
+      .then(data => {
+        console.log('Conexão solicitada:', data.message);
+      })
+      .catch(error => {
+        console.error('Erro ao solicitar conexão:', error);
+        statusLog.innerText = 'Erro ao conectar. Tente novamente.';
+        showConnectButton();
+      });
+  });
+
+  disconnectButton.addEventListener('click', () => {
+    disconnectButton.disabled = true;
+    statusLog.innerText = 'Desconectando...';
+
+    fetch('/disconnect-bot', { method: 'POST' })
+      .then(response => response.json())
+      .then(data => {
+        console.log('Desconexão solicitada:', data.message);
+        statusLog.innerText = 'Desconectado com sucesso. Clique em Conectar para iniciar.';
+        setDisconnectedState();
+      })
+      .catch(error => {
+        console.error('Erro ao solicitar desconexão:', error);
+        statusLog.innerText = 'Erro ao tentar desconectar. Tente novamente.';
+        showDisconnectButton();
+      });
+  });
+
+  clearSessionButton.addEventListener('click', () => {
+    clearSessionButton.disabled = true;
+    statusLog.innerText = 'Limpando sessão...';
+    qrImage.src = './assets/loader.gif';
+
+    fetch('/clear-session', { method: 'POST' })
+      .then(response => response.json())
+      .then(data => {
+        console.log('Sessão limpa:', data.message);
+        if (data.success) {
+          statusLog.innerText = 'Sessão apagada. Clique em Conectar para iniciar novamente.';
+          setDisconnectedState();
+        } else {
+          statusLog.innerText = 'Erro ao limpar a sessão.';
+          showConnectButton();
+        }
+      })
+      .catch(error => {
+        console.error('Erro ao limpar sessão:', error);
+        statusLog.innerText = 'Erro ao limpar sessão. Tente novamente.';
+        showConnectButton();
+      });
+  });
+</script>
+</body>
+</html>
