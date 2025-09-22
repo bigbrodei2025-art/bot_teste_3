@@ -117,7 +117,7 @@ app.use(compression());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 1000;
 const client = new MongoClient(process.env.MONGO_URL);
 
 let sock, socketCliente, qrState = null, reconnectAttempts = 0;
